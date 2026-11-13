@@ -12,7 +12,8 @@ primary_region = 'sin'
   NODE_ENV = 'production'
   PORT = '8080'
 
-# Must match the Fly volume name (dashboard Volumes). Typo-safe: roundsal_data.
+# MUST equal the volume Name in Fly Dashboard → Volumes (not the vol_… id).
+# Current volume: roundsal_data. If rename/create, update this string to match.
 [[mounts]]
   source = 'roundsal_data'
   destination = '/data'
