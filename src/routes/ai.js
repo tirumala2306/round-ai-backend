@@ -8,6 +8,9 @@ import { all } from '../db.js';
 import { resolveMediaPayload } from '../upload.js';
 import { buildRoundBrief, prepareRoundBrief } from '../round_brief.js';
 import * as T from '../teaching.js';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 /** Replays the stored response when the client retries with the same Idempotency-Key (no duplicate AI calls). */
 async function withIdempotency(ctx, fn) {
