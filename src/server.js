@@ -8,6 +8,7 @@ import { HttpError } from './util.js';
 import { seedTemplates } from './templates.js';
 import { seedDemoIcdIfEmpty } from './icd.js';
 import { seedExampleCheckRules } from './check_rules.js';
+import { seedDemo } from './seed.js';
 import { parseMultipart } from './upload.js';
 import { coreRoutes } from './routes/core.js';
 import { patientRoutes } from './routes/patients.js';
@@ -100,5 +101,15 @@ export function createApp() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  createApp().listen(config.port, () => console.log(`RoundsAI backend on :${config.port} (AI provider: ${config.provider})`));
+  // Empty DB → demo users once (no-op if users already exist). Needed when SSH/CLI unavailable.
+  const app = createApp();
+  seedDemo()
+    .then((out) => {
+      if (out) console.log('Seeded demo users (admin@rounds.test / ChangeMe-12345)');
+      app.listen(config.port, () => console.log(`RoundsAI backend on :${config.port} (AI provider: ${config.provider})`));
+    })
+    .catch((e) => {
+      console.error('Startup seed failed:', e?.message || e);
+      process.exit(1);
+    });
 }
