@@ -1,0 +1,20 @@
+{
+  "name": "roundsai-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "RoundsAI backend: patient context, AI orchestration, PubMed evidence, MCQ engine, admin APIs",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
+    "seed": "node --disable-warning=ExperimentalWarning src/seed.js",
+    "import-icd": "node --disable-warning=ExperimentalWarning scripts/import-icd.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "busboy": "1.6.0"
+  }
+}
