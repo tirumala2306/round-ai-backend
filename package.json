@@ -8,8 +8,8 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/server.js",
-    "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
+    "start": "node init && node --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node init && node --watch --disable-warning=ExperimentalWarning src/server.js",
     "seed": "node --disable-warning=ExperimentalWarning src/seed.js",
     "import-icd": "node --disable-warning=ExperimentalWarning scripts/import-icd.js",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
