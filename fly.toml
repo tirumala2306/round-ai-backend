@@ -12,10 +12,10 @@ primary_region = 'sin'
   NODE_ENV = 'production'
   PORT = '8080'
 
-# MUST equal the volume Name in Fly Dashboard → Volumes (not the vol_… id).
-# Current volume: roundsal_data. If rename/create, update this string to match.
+# Volume name must match Fly Dashboard → Volumes (not vol_… id).
+# Deploy error proved the attached volume is named roundsai_data.
 [[mounts]]
-  source = 'roundsal_data'
+  source = 'roundsai_data'
   destination = '/data'
 
 [http_service]
