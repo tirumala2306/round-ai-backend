@@ -147,6 +147,7 @@ export function adminHealth({ providerName, config, icdStats }) {
     model: config.provider === 'openai' ? config.openai.model : 'mock-1',
     prompt_version: config.versions.prompt,
     db_ok,
+    db_path: config.dbPath,
     icd_loaded: (icd.count || 0) > 0,
     icd,
     ai_enabled: getSetting('ai_enabled', true),

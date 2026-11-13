@@ -12,16 +12,18 @@ primary_region = 'sin'
   NODE_ENV = 'production'
   PORT = '8080'
 
+# Must match the Fly volume name (dashboard Volumes). Typo-safe: roundsal_data.
 [[mounts]]
-  source = 'roundsai_data'
+  source = 'roundsal_data'
   destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  # Keep one machine up so SQLite + volume stay warm during demo.
+  auto_stop_machines = 'off'
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
 
 [[vm]]
   size = 'shared-cpu-1x'
