@@ -13,7 +13,22 @@ import { replyRaw } from '../http.js';
 import * as Admin from '../admin_ops.js';
 
 export function coreRoutes(r) {
-  r.get('/health', { auth: false }, () => ({ status: 'ok', time: nowIso(), provider: providerName() }));
+  r.get('/health', { auth: false }, () => {
+    let users = 0;
+    let patients = 0;
+    try {
+      users = Number(get('SELECT COUNT(*) AS n FROM users')?.n || 0);
+      patients = Number(get('SELECT COUNT(*) AS n FROM patients')?.n || 0);
+    } catch { /* db not ready */ }
+    return {
+      status: 'ok',
+      time: nowIso(),
+      provider: providerName(),
+      db_path: config.dbPath,
+      users,
+      patients,
+    };
+  });
 
   r.post('/auth/login', { auth: false }, ({ body }) => {
     const email = str(body.email, 200).toLowerCase();

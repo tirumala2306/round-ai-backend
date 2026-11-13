@@ -194,7 +194,29 @@ function migrate(database) {
   }
 }
 
+/** Production must use the Fly volume at /data — otherwise every machine stop wipes SQLite. */
+function assertPersistentVolume(file) {
+  if (process.env.NODE_ENV !== 'production' || file === ':memory:') return;
+  if (!file.startsWith('/data/')) {
+    throw new Error(`Production DB_PATH must be under /data (got ${file})`);
+  }
+  try {
+    const mounts = fs.readFileSync('/proc/mounts', 'utf8');
+    const hasData = mounts.split('\n').some((line) => {
+      const parts = line.split(/\s+/);
+      return parts[1] === '/data';
+    });
+    if (!hasData) {
+      throw new Error('FATAL: /data is not a mounted Fly volume. Attach volume roundsal_data → /data, then redeploy.');
+    }
+  } catch (e) {
+    if (e && String(e.message || e).includes('FATAL')) throw e;
+    // /proc/mounts missing (non-Linux): skip mount check
+  }
+}
+
 export function openDb(file = config.dbPath) {
+  assertPersistentVolume(file);
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   db = new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys=ON;');
