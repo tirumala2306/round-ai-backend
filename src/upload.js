@@ -14,6 +14,16 @@ export function mimeAllowed(kind, mime) {
   return false;
 }
 
+/** Best-effort MIME from magic bytes when the client sends octet-stream. */
+export function sniffMime(buffer) {
+  if (!buffer || buffer.length < 3) return '';
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
+  if (buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buffer.length >= 6 && (buffer.toString('ascii', 0, 6) === 'GIF87a' || buffer.toString('ascii', 0, 6) === 'GIF89a')) return 'image/gif';
+  return '';
+}
+
 export function maxBytesFor(kind) {
   return kind === 'audio' ? config.uploads.maxAudioBytes : config.uploads.maxImageBytes;
 }
@@ -118,17 +128,21 @@ export function resolveMediaPayload({ body, upload, defaultKind }) {
 
   let buffer;
   let mimeType;
+  const fieldMime = str(fields.mime_type || fields.mimeType, 80).toLowerCase().split(';')[0].trim();
 
   if (upload?.file?.buffer?.length) {
     buffer = upload.file.buffer;
-    mimeType = upload.file.mimeType;
+    // Clients (e.g. Dio) often send application/octet-stream on the file part.
+    // Prefer an explicit mime_type field, then the part header, then sniff.
+    const partMime = String(upload.file.mimeType || '').toLowerCase().split(';')[0].trim();
+    mimeType = fieldMime || (partMime && partMime !== 'application/octet-stream' ? partMime : '') || sniffMime(buffer) || partMime;
     need(buffer.length <= maxBytesFor(kind), 413, 'too_large', `File exceeds the ${kind} size limit`);
   } else {
     const b64 = fields.file_base64 || fields.audio_base64 || fields.image_base64;
     need(b64, 400, 'file_required', 'Provide multipart file or file_base64');
-    mimeType = str(fields.mime_type || fields.mimeType, 80).toLowerCase();
-    need(mimeType, 400, 'mime_required', 'mime_type is required with base64 uploads');
     buffer = decodeBase64(b64, kind);
+    mimeType = fieldMime || sniffMime(buffer) || '';
+    need(mimeType, 400, 'mime_required', 'mime_type is required with base64 uploads');
   }
 
   need(mimeAllowed(kind, mimeType), 415, 'mime_not_allowed', `MIME type not allowed for ${kind}`);

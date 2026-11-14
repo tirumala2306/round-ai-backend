@@ -508,7 +508,44 @@ test('M2a: oversized and empty uploads are rejected without creating a source', 
     kind: 'image', mime_type: 'image/png', file_base64: big,
   }});
   assert.equal(tooBig.status, 413);
+  assert.equal(tooBig.json.error.code, 'too_large');
   assert.equal((await api('GET', `/patients/${seed.patientId}/sources`, { token: resident })).json.length, before);
+});
+
+test('M2a: multipart octet-stream still accepted when mime_type field or JPEG magic present', async () => {
+  const { resolveMediaPayload, sniffMime } = await import('../src/upload.js');
+  // Minimal JPEG SOI is enough for sniffMime
+  const jpegMagic = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+  assert.equal(sniffMime(jpegMagic), 'image/jpeg');
+
+  const viaField = resolveMediaPayload({
+    body: {},
+    upload: {
+      fields: { kind: 'image', mime_type: 'image/jpeg' },
+      file: { buffer: jpegMagic, mimeType: 'application/octet-stream', filename: 'photo.jpg' },
+    },
+  });
+  assert.equal(viaField.mimeType, 'image/jpeg');
+
+  const viaSniff = resolveMediaPayload({
+    body: {},
+    upload: {
+      fields: { kind: 'image' },
+      file: { buffer: jpegMagic, mimeType: 'application/octet-stream', filename: 'photo.jpg' },
+    },
+  });
+  assert.equal(viaSniff.mimeType, 'image/jpeg');
+
+  assert.throws(
+    () => resolveMediaPayload({
+      body: {},
+      upload: {
+        fields: { kind: 'image' },
+        file: { buffer: Buffer.from('not-an-image'), mimeType: 'application/octet-stream', filename: 'x.bin' },
+      },
+    }),
+    (e) => e.code === 'mime_not_allowed',
+  );
 });
 
 /* ------------------------------------------------------------------ M2b: census by photo or voice */
@@ -684,6 +721,87 @@ test('M2c: validateIcdSuggest unit — foreign codes dropped; admin icd status w
   const parsed = parseOrderLine(padded);
   assert.equal(parsed.code, 'J18.9');
   assert.equal(parsed.billable, 1);
+});
+
+/* ------------------------------------------------------------------ W4: scribe note from dictation */
+
+test('W4: from-dictation cleans messy transcript into sections; ambiguity → needs_clarification; no plan → placeholder', async () => {
+  // Earlier admin tests may have published a slim progress template — restore defaults.
+  await api('PUT', '/admin/templates/progress', { token: admin, body: {
+    title: 'Progress note',
+    sections: [
+      { key: 'subjective', title: 'Subjective', source: 'clinician_subjective' },
+      { key: 'objective', title: 'Objective', source: 'facts_and_exam' },
+      { key: 'assessment_plan', title: 'Assessment and Plan', source: 'clinician_plan' },
+    ],
+  }});
+
+  const messy = 'uh patient says um had a had a fever last night no chest pain maybe some chills creatinine was two point one this morning';
+  const r = await api('POST', `/patients/${seed.patientId}/notes/from-dictation`, {
+    token: resident,
+    body: { note_type: 'progress', note_date: '2026-09-12', transcript: messy },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.content.scribe_mode, 'from_dictation');
+  const subj = r.json.content.sections.find((s) => s.key === 'subjective');
+  assert.ok(subj.sentences?.length >= 1);
+  assert.match(subj.text, /fever|chest pain|chills/i);
+  assert.ok(subj.sentences.every((s) => Array.isArray(s.spans) && s.spans.length));
+  const plan = r.json.content.sections.find((s) => s.key === 'assessment_plan');
+  assert.match(plan.text, /not entered/i);
+
+  const amb = await api('POST', `/patients/${seed.patientId}/notes/from-dictation`, {
+    token: resident,
+    body: {
+      note_type: 'icu',
+      note_date: '2026-09-12',
+      transcript: 'overnight the ICU console was placed and urine output was low',
+    },
+  });
+  assert.equal(amb.status, 200);
+  assert.ok(amb.json.content.needs_clarification.some((c) => /placed|console/i.test(c.phrase) || /What was placed/i.test(c.question)));
+});
+
+test('W4: invented number in scribe sentence is dropped; negation preserved', async () => {
+  const { validateNoteFromDictation } = await import('../src/ai/validators.js');
+  const template = {
+    key: 'progress',
+    sections: [
+      { key: 'subjective', title: 'Subjective', source: 'clinician_subjective' },
+      { key: 'objective', title: 'Objective', source: 'facts_and_exam' },
+      { key: 'assessment_plan', title: 'Assessment and Plan', source: 'clinician_plan' },
+    ],
+  };
+  const transcript = 'Patient reports fever. Denies chest pain. INVENT_BP_99 marker.';
+  const feverStart = transcript.indexOf('Patient reports fever');
+  const denyStart = transcript.indexOf('Denies chest pain');
+  const ctx = {
+    facts: [{ fact_id: 'f1', label: 'Creatinine', value: '2.1', unit: 'mg/dL', event_time: '2026-09-12', assertion: 'present' }],
+    trends: [],
+    conflicts: [],
+    missing_information: [],
+  };
+  const raw = {
+    sections: [
+      {
+        key: 'subjective',
+        sentences: [
+          { text: 'Patient reports fever.', spans: [{ start: feverStart, end: feverStart + 'Patient reports fever'.length }] },
+          { text: 'Denies chest pain.', spans: [{ start: denyStart, end: denyStart + 'Denies chest pain'.length }] },
+          { text: 'Blood pressure was 180/110.', spans: [{ start: transcript.indexOf('fever'), end: transcript.indexOf('fever') + 5 }] },
+        ],
+      },
+      { key: 'objective', sentences: [] },
+      { key: 'assessment_plan', sentences: [] },
+    ],
+    needs_clarification: [],
+  };
+
+  const v = validateNoteFromDictation(raw, ctx, template, transcript, '2026-09-12');
+  assert.ok(v.output.sections.find((s) => s.key === 'subjective').text.includes('Denies chest pain'));
+  assert.ok(!/180/.test(v.output.sections.find((s) => s.key === 'subjective').text));
+  assert.ok(v.issues.some((i) => i.code === 'invented_number'));
+  assert.match(v.output.sections.find((s) => s.key === 'assessment_plan').text, /not entered/i);
 });
 
 /* ------------------------------------------------------------------ M2d: notes from dictation */

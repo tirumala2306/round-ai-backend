@@ -397,6 +397,7 @@ export function openStream({ user, req, res, lastEventId }) {
   assertChatEnabled();
   const channels = listChannels(user);
   const channelIds = new Set(channels.map((c) => c.id));
+  // Preserve CORS already set on `res` (comma-list Origin reflection in server.js).
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-store',

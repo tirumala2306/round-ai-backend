@@ -16,6 +16,9 @@ export const config = {
   dbPath: env.DB_PATH || './data/roundsai.db',
   authSecret: env.AUTH_SECRET || 'dev-only-change-me',
   tokenTtlSeconds: Number(env.TOKEN_TTL_SECONDS || 8 * 3600),
+  // Comma-separated allow-list (admin + Flutter web + localhost). No bare *
+  // in production when multiple clients are configured.
+  // Example: https://round-ai-admin.vercel.app,https://round-ai-app.vercel.app,http://localhost:5173
   corsOrigin: env.CORS_ORIGIN || '*',
   provider: env.AI_PROVIDER || 'mock', // 'mock' | 'openai'
   openai: {
@@ -32,8 +35,10 @@ export const config = {
     maxContextFacts: Number(env.MAX_CONTEXT_FACTS || 300),
     maxEvidenceCandidates: 30,
     modelTimeoutMs: Number(env.MODEL_TIMEOUT_MS || 60000),
+    // Global JSON body cap (non-upload routes). Keep small.
     maxBodyBytes: 1_000_000,
-    // Intake/transcribe JSON bodies carry base64; allow up to ~35 MiB.
+    // Intake/transcribe/census-intake only (JSON base64). Multipart uses busboy
+    // fileSize = max(audio,image). Default ~35 MiB ≈ 10 MiB image * 4/3 base64.
     maxUploadBodyBytes: Number(env.MAX_UPLOAD_BODY_BYTES || 35_000_000),
   },
   uploads: {

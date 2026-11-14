@@ -79,6 +79,10 @@ export function aiRoutes(r) {
   r.post('/patients/:id/notes', (ctx) => withIdempotency(ctx, () =>
     O.draftNote({ user: ctx.user, patient: authorizePatient(ctx.user, ctx.params.id), input: ctx.body })));
 
+  // Scribe: one dictation → structured note (keeps POST /notes field mode intact).
+  r.post('/patients/:id/notes/from-dictation', (ctx) => withIdempotency(ctx, () =>
+    O.draftNoteFromDictation({ user: ctx.user, patient: authorizePatient(ctx.user, ctx.params.id), input: ctx.body || {} })));
+
   r.post('/artifacts/:id/sections/:key/rewrite', (ctx) => {
     const artifact = authorizeArtifact(ctx.user, ctx.params.id);
     return O.rewriteSection({ user: ctx.user, artifact, key: ctx.params.key, mode: ctx.body.mode });

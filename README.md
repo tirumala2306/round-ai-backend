@@ -13,12 +13,43 @@ PubMed evidence, MCQ learning engine, and the admin-panel APIs.
 ```bash
 cp .env.example .env        # then edit AUTH_SECRET
 npm install                 # installs busboy
-npm run seed                # demo users + one fictional patient
+npm run seed                # demo users + one fictional patient (empty DB only)
+npm run seed-test-data      # API seed/refresh of fictional chart data (see below)
 npm start                   # http://localhost:8080
 npm test                    # end-to-end tests
 ```
 
 Demo logins (password `ChangeMe-12345`): `admin@rounds.test`, `resident@rounds.test` (Team A, has the demo patient), `other@rounds.test` (Team B, cannot see Team A patients).
+
+### Fictional test data (API)
+
+`scripts/seed-test-data.mjs` ensures a marker patient `Jordan Hale (fictional)` with a source, confirmed facts, and Today's plan. **Never real PHI.**
+
+```bash
+# Local
+npm run seed-test-data
+
+# Production (explicit confirm required)
+BASE_URL=https://round-ai-backend.fly.dev CONFIRM=SEED_FICTIONAL npm run seed-test-data
+
+# How to reset (no silent wipe)
+npm run seed-test-data -- --reset-help
+```
+
+Idempotent: safe to re-run. Full production wipe needs ops approval (volume/DB) — see `--reset-help`.
+
+## Fly.io logs (photo / vision debugging)
+
+Never paste clinical text or image contents into tickets. Use status codes only:
+
+```bash
+fly logs -a round-ai-backend
+# Look for lines like:
+#   [ai] extract_from_image failed: Vision provider returned 400 provider_status=400
+#   Unhandled error: …   (should be rare; body is never logged)
+```
+
+Upload limits: JSON bodies on `/intake`, `/transcribe`, `/census/intake` use `MAX_UPLOAD_BODY_BYTES` (default 35 MiB). Other routes stay at 1 MiB. Decoded image files still capped by `MAX_IMAGE_BYTES` (default 10 MiB). Fly’s proxy accepts these sizes for this app; if a client sees a non-JSON 413, check the proxy and raise `MAX_UPLOAD_BODY_BYTES` only after confirming the app downscales photos.
 
 ## Switching to a real AI model
 
@@ -77,7 +108,7 @@ Every AI response is an envelope: `artifact_id, operation, patient_id, context_r
 **Chart data:** `POST/GET /patients/:id/sources`, `GET /patients/:id/facts?status=`, `POST /patients/:id/facts` (manual, confirmed),
 `POST /patients/:id/facts/review` `{fact_ids, status}`, `GET /facts/:id/source` (source drawer), `PUT /patients/:id/plan`
 
-**AI:** `POST /patients/:id/sources/:sid/extract`, `/summary`, `/present` (M3b oral presentation), `/notes`, `/problems/suggest`, `/evidence`, `/mcq`, `/tasks/propose`, `/signout`, `/ask`, `/considerations` (off by default),
+**AI:** `POST /patients/:id/sources/:sid/extract`, `/summary`, `/present` (M3b oral presentation), `/notes`, `/notes/from-dictation` (scribe: one transcript → sections with spans + `needs_clarification`; keeps `/notes` field mode), `/problems/suggest`, `/evidence`, `/mcq`, `/tasks/propose`, `/signout`, `/ask`, `/considerations` (off by default),
 `POST /artifacts/:id/sections/:key/rewrite` `{mode: regenerate|shorten|expand|improve}` (returns before/after, applies nothing)
 
 **Oral presentation (M3b):** `POST /patients/:id/present` `{date?}` — ~60–90s spoken draft (~150–220 words) from confirmed facts, `changesSince()`, latest reviewed summary, and clinician plan. Every chart sentence cites `fact_ids`; unsupported sentences dropped; over-budget flagged. Always `requires_review`.
@@ -110,7 +141,13 @@ Every AI response is an envelope: `artifact_id, operation, patient_id, context_r
 `GET /channels/unread`, `GET /channels/search?q=`, `GET /stream` (SSE, `Last-Event-ID` replay), `POST /chat/devices` (token hash only),
 `POST /channels/:id/summarize` (explicit AI draft of that thread only). Attachments out of scope. Push payload must be generic ("New message") — never PHI.
 
-**Admin (role=admin):** set `CORS_ORIGIN` to the admin panel origin (e.g. `https://admin.example.com`).  
+**Admin (role=admin):** set `CORS_ORIGIN` to a **comma-separated allow-list** of browser origins (no bare `*` once multiple apps are live), e.g. admin Vercel + Flutter web demo + local Vite:
+
+```bash
+fly secrets set CORS_ORIGIN="https://round-ai-admin.vercel.app,https://YOUR-FLUTTER-WEB.vercel.app,http://localhost:5173"
+```
+
+The API reflects the request `Origin` when it matches the list (`Vary: Origin`).  
 `GET /admin/health` (provider, model, prompt version, db_ok, ICD loaded),  
 `/admin/users` (includes `last_login_at`, `last_activity_at`; create; `PATCH` for role / deactivate / reset password ≥10 chars),  
 `/admin/teams` (+members),  

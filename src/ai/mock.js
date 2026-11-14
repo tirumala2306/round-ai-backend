@@ -69,6 +69,63 @@ const ops = {
     return { sections, missing_information: [], proposed_considerations: [] };
   },
 
+  draft_note_from_dictation({ context, template, transcript }) {
+    const t = String(transcript || '');
+    const findSpan = (needle) => {
+      const i = t.toLowerCase().indexOf(String(needle).toLowerCase());
+      if (i < 0) return null;
+      return { start: i, end: i + needle.length };
+    };
+    const spanFor = (re, fallbackText) => {
+      const m = t.match(re);
+      const phrase = m ? m[0] : fallbackText;
+      const sp = findSpan(phrase);
+      return sp ? { text: phrase.replace(/\bum\b|\buh\b|\bhad a\s+/gi, '').replace(/\s+/g, ' ').trim(), spans: [sp] } : null;
+    };
+    const needs = [];
+    if (/ICU console/i.test(t)) {
+      const sp = findSpan('ICU console was placed') || findSpan('ICU console');
+      if (sp) needs.push({ phrase: t.slice(sp.start, sp.end), question: 'What was placed?', spans: [sp] });
+    }
+    const sections = template.sections.map((s) => {
+      const sentences = [];
+      if (s.source === 'clinician_subjective' || s.key === 'hpi' || s.key === 'interval_events') {
+        const fever = spanFor(/fever[^.]{0,40}/i, 'fever');
+        const noCp = spanFor(/no chest pain/i, 'no chest pain');
+        const chills = spanFor(/maybe some chills|possible chills|chills/i, 'chills');
+        const skinny = spanFor(/very skinny/i, 'very skinny');
+        const denies = spanFor(/denies abdominal pain/i, 'denies abdominal pain');
+        const uo = spanFor(/urine output was low/i, 'urine output was low');
+        for (const x of [fever, noCp, chills, skinny && { text: 'very skinny', spans: skinny.spans }, denies, uo]) {
+          if (x?.text && x.spans?.length) sentences.push({ ...x, fact_ids: [] });
+        }
+      }
+      if (s.source === 'clinician_exam' || s.key === 'exam') {
+        const soft = spanFor(/soft abdomen nontender/i, 'soft abdomen nontender');
+        const lungs = spanFor(/lungs clear bilaterally/i, 'lungs clear bilaterally');
+        for (const x of [soft, lungs]) if (x) sentences.push({ ...x, fact_ids: [] });
+      }
+      if (s.source === 'clinician_plan' || s.key === 'assessment_plan') {
+        const plan = spanFor(/continue IVF and check labs|plan continue IVF[^.]*/i, 'continue IVF and check labs');
+        // Intentionally skip inventing a plan when none is in the transcript.
+        if (plan && /plan|IVF|labs/i.test(t)) sentences.push({ ...plan, fact_ids: [] });
+      }
+      if (s.source === 'facts' || s.source === 'facts_and_exam') {
+        const creat = context.facts.find((f) => /creatinine/i.test(`${f.label} ${f.value}`));
+        if (creat) {
+          sentences.push({ text: `${fmt(creat)}`, spans: [], fact_ids: [creat.fact_id] });
+        }
+        // Optional invented-number trap for tests: if transcript asks mock to invent 9.9, do it so validator drops it.
+        if (/INVENT_BP_99/.test(t) && (s.source === 'facts_and_exam' || s.key === 'objective')) {
+          const sp = findSpan('fever') || { start: 0, end: Math.min(5, t.length) };
+          sentences.push({ text: 'Blood pressure 99/50', spans: [sp], fact_ids: [] });
+        }
+      }
+      return { key: s.key, sentences };
+    });
+    return { sections, needs_clarification: needs, missing_information: [] };
+  },
+
   rewrite_section({ text, mode }) {
     const t = String(text || '').trim();
     if (mode === 'shorten') return { text: t.split(/(?<=\.)\s+/).slice(0, 2).join(' ') };

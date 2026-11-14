@@ -54,6 +54,16 @@ function sendRaw(res, status, raw, contentType) {
   res.end(data);
 }
 
+/** Resolve Access-Control-Allow-Origin from a comma-separated allow-list. */
+export function resolveCorsOrigin(requestOrigin, configured = config.corsOrigin) {
+  const raw = String(configured || '').trim();
+  if (!raw || raw === '*') return '*';
+  const allowed = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!requestOrigin) return allowed[0] || '*';
+  if (allowed.includes(requestOrigin)) return requestOrigin;
+  return allowed[0] || 'null';
+}
+
 export function createApp() {
   openDb(config.dbPath);
   seedTemplates();
@@ -62,7 +72,9 @@ export function createApp() {
   const router = buildRouter();
 
   return http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', config.corsOrigin);
+    const origin = resolveCorsOrigin(req.headers.origin);
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    if (origin !== '*') res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, Last-Event-ID');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('X-Content-Type-Options', 'nosniff');

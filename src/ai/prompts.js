@@ -33,6 +33,37 @@ For sections whose source is clinician_history, use ONLY data.inputs.history[sec
 Preserve the clinician's negations and uncertainty exactly (e.g. "denies chest pain", "possible").
 Shape: { "sections": [ { "key": string, "text": string, "fact_ids": [fact_id,...] } ], "missing_information": [string], "proposed_considerations": [${CLAIM}] }`,
   },
+  draft_note_from_dictation: {
+    system: `${COMMON}
+You are a clinical SCRIBE. data.transcript is one messy spoken dictation (mixed history, symptoms, exam, events, plan). Clean disfluencies, fix grammar, use standard clinical phrasing, and DISTRIBUTE content into data.template.sections.
+Hard rules for this task:
+- Every output sentence MUST cite character spans into data.transcript: "spans":[{"start":number,"end":number}] (0-based, end exclusive, must be substrings of the transcript).
+- Never add facts, numbers, meds, doses, diagnoses, severities, or exam findings that were not said. Do not upgrade vague language (e.g. keep "very skinny" as "thin"; do not write "cachectic").
+- Preserve negation and uncertainty ("no chest pain", "denies", "possible", "maybe").
+- Ambiguous phrases go in needs_clarification with a short clinician question; do not guess. Leave the rest of the note intact.
+- If nothing relevant was said for a section, return an empty sentences array for that section (the server will insert a not-entered placeholder). If no plan was dictated, do not invent a plan.
+- For sections whose template source is "facts" or "facts_and_exam", you may also cite confirmed chart fact_ids from data.context.facts for lab/vitals lines; exam lines still need transcript spans when they come from dictation.
+- Do not echo the raw transcript verbatim with ums and repeats; clean it into clinical sentences.
+
+Shape: {
+  "sections": [ { "key": string, "sentences": [ { "text": string, "spans": [{"start":number,"end":number}], "fact_ids": [fact_id,...] } ] } ],
+  "needs_clarification": [ { "phrase": string, "question": string, "spans": [{"start":number,"end":number}] } ],
+  "missing_information": [string]
+}
+
+Few-shot (fictional only):
+Example 1 transcript: "uh patient says um had a had a fever last night no chest pain maybe some chills creatinine was two point one this morning plan continue IVF and check labs"
+→ subjective: fever last night, no chest pain, possible chills (spans on those clauses); objective/data: creatinine 2.1 from chart or transcript; assessment_plan: continue IVF and check labs; no invented diagnosis.
+
+Example 2 transcript: "exam soft abdomen nontender lungs clear bilaterally"
+→ exam sentences only; other clinician sections empty; do not invent ROS or plan.
+
+Example 3 transcript: "overnight the ICU console was placed and urine output was low"
+→ needs_clarification for "ICU console was placed" asking what was placed; interval/subjective may include low urine output with spans; do not invent device type.
+
+Example 4 transcript: "patient is very skinny denies abdominal pain"
+→ write "thin" or "very thin", not "cachectic"; keep denies abdominal pain.`,
+  },
   rewrite_section: {
     system: `${COMMON}
 Task: rewrite data.text according to data.mode (regenerate|shorten|expand|improve). Do not add any new clinical fact or number.

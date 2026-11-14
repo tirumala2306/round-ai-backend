@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { all, get, run, tx, audit, getSetting } from '../db.js';
-import { HttpError, uid, nowIso, today, jsonParse, str, need } from '../util.js';
+import { HttpError, uid, nowIso, today, jsonParse, str, need, isIsoDate } from '../util.js';
 import { buildContext, bumpRevision, changesSince } from '../context.js';
 import { getActiveTemplate } from '../templates.js';
 import { generate, transcribe, extractFromImage, AdapterError, providerName } from './adapter.js';
@@ -111,8 +111,8 @@ async function callMedia(user, label, fn) {
     res = await fn();
   } catch (e) {
     if (e instanceof AdapterError) {
-      // Message is adapter status text only (no audio / PHI).
-      console.error(`[ai] ${label} failed:`, e.message);
+      // Log provider status code / adapter reason only — never media bytes or clinical text.
+      console.error(`[ai] ${label} failed:`, e.message, e.status != null ? `provider_status=${e.status}` : '');
       audit(user.id, 'ai_failed', { detail: { operation: label, status: e.status ?? null, reason: e.message } });
       throw new HttpError(502, 'ai_unavailable', 'AI generation failed. Your data is unchanged. Retry, or continue manually.');
     }
@@ -141,7 +141,16 @@ export async function intakeMedia({ user, patient, media }) {
       const res = await callMedia(user, 'extract_from_image', () =>
         extractFromImage({ imageBase64: buffer.toString('base64'), mimeType }));
       const { output, issues } = checked(() => V.validateImageExtract(res.json));
-      need(output, 502, 'ai_invalid_output', 'Image extraction could not be validated.', { issues });
+      // Specific code so the app can say "could not read the photo" instead of a generic AI error.
+      if (!output) {
+        const empty = (issues || []).some((i) => i.code === 'empty_image_extract');
+        throw new HttpError(
+          502,
+          empty ? 'image_unreadable' : 'ai_invalid_output',
+          empty ? 'Could not read text from the photo.' : 'Image extraction could not be validated.',
+          { issues },
+        );
+      }
       text = output.text;
       lowLegibilityLines = output.low_legibility_lines;
       confidence = output.confidence;
@@ -200,7 +209,15 @@ async function mediaToText(user, media) {
   const res = await callMedia(user, 'extract_from_image', () =>
     extractFromImage({ imageBase64: buffer.toString('base64'), mimeType }));
   const { output, issues } = checked(() => V.validateImageExtract(res.json));
-  need(output, 502, 'ai_invalid_output', 'Image extraction could not be validated.', { issues });
+  if (!output) {
+    const empty = (issues || []).some((i) => i.code === 'empty_image_extract');
+    throw new HttpError(
+      502,
+      empty ? 'image_unreadable' : 'ai_invalid_output',
+      empty ? 'Could not read text from the photo.' : 'Image extraction could not be validated.',
+      { issues },
+    );
+  }
   return { text: output.text, model: res.model, low_legibility_lines: output.low_legibility_lines, confidence: output.confidence };
 }
 
@@ -358,13 +375,38 @@ export async function presentPatient({ user, patient, date }) {
     content: jsonParse(reviewed.content, {}),
   } : null;
   const clinician_plan = ctx.clinician_plan;
-  const res = await callModel(user, 'present_patient', {
+  const payload = {
     context: ctx,
     changes,
     reviewed_summary: reviewed_summary ? { one_liner: reviewed_summary.content.one_liner, sections: reviewed_summary.content.sections } : null,
     clinician_plan,
-  });
-  const { output, issues } = checked(() => V.validatePresentation(res.json, ctx, { planText: clinician_plan?.text || '' }));
+  };
+
+  let res = await callModel(user, 'present_patient', payload);
+  let { output, issues } = checked(() => V.validatePresentation(res.json, ctx, { planText: clinician_plan?.text || '' }));
+
+  // If validation stripped most chart sentences, regenerate once with a stricter hint.
+  const rawCount = Array.isArray(res.json?.sentences) ? res.json.sentences.length : 0;
+  const keptCount = (output.sentences || []).length;
+  const strippedHard = rawCount >= 2 && keptCount <= Math.floor(rawCount / 2);
+  let regenerated = false;
+  if (strippedHard) {
+    regenerated = true;
+    res = await callModel(user, 'present_patient', {
+      ...payload,
+      stricter: true,
+      instruction: 'Prior attempt had unsupported sentences dropped. Cite only known fact_ids; do not invent content.',
+    });
+    ({ output, issues } = checked(() => V.validatePresentation(res.json, ctx, { planText: clinician_plan?.text || '' })));
+  }
+
+  const guidance = [];
+  if (!(ctx.facts || []).length) guidance.push('Confirm facts before generating a presentation.');
+  if (!clinician_plan?.text) guidance.push("Confirm facts and save Today's plan");
+  if ((output.sentences || []).length === 0) {
+    guidance.push('Confirm facts and save Today\'s plan');
+  }
+
   return saveArtifact({
     user, patient, operation: 'present_patient',
     content: {
@@ -373,6 +415,8 @@ export async function presentPatient({ user, patient, date }) {
       changes_status: changes.status,
       reviewed_summary_artifact_id: reviewed_summary?.artifact_id || null,
       requires_review: true,
+      regenerated_once: regenerated,
+      missing_information: [...new Set([...(output.missing_information || []), ...guidance])],
     },
     issues, res,
   });
@@ -508,6 +552,72 @@ export async function draftNote({ user, patient, input }) {
       note_type: noteType, note_date: date, ...output, unresolved_flags: unresolved,
       ignored_history_keys: resolved.ignoredHistoryKeys,
       fed_from_sources: resolved.fed_from_sources,
+    },
+    issues, res, templateVersion: `${template.key}@v${template.version}`,
+  });
+}
+
+/**
+ * Scribe: one messy dictation → structured note sections with transcript spans.
+ * Body: { note_type, transcript?, source_ids?, note_date?, clarifications? }
+ * clarifications: [{ phrase, answer }] optional answers to prior needs_clarification.
+ */
+export async function draftNoteFromDictation({ user, patient, input }) {
+  const noteType = str(input.note_type, 20) || 'progress';
+  const template = getActiveTemplate(noteType);
+  need(template, 400, 'unknown_template', `No active template "${noteType}".`);
+  const date = str(input.note_date, 10) || today();
+  need(isIsoDate(date), 400, 'bad_date', 'note_date must be YYYY-MM-DD');
+
+  let transcript = str(input.transcript, 100_000);
+  const sourceIds = Array.isArray(input.source_ids)
+    ? input.source_ids.map((x) => str(x, 64)).filter(Boolean).slice(0, 10)
+    : [];
+  if (!transcript && sourceIds.length) {
+    const chunks = [];
+    for (const id of sourceIds) {
+      const s = get('SELECT id, text FROM sources WHERE id=? AND patient_id=?', id, patient.id);
+      need(s, 404, 'source_not_found', `Source ${id} not found for this patient`);
+      const t = str(s.text, 100_000);
+      if (t) chunks.push(t);
+    }
+    transcript = chunks.join('\n\n');
+  }
+  need(transcript, 400, 'transcript_required', 'Provide transcript text or source_ids with text');
+
+  const clarifications = Array.isArray(input.clarifications) ? input.clarifications : [];
+  let working = transcript;
+  for (const c of clarifications.slice(0, 20)) {
+    const phrase = str(c?.phrase, 300);
+    const answer = str(c?.answer, 500);
+    if (phrase && answer) working += `\n[Clarification about "${phrase}": ${answer}]`;
+  }
+
+  const ctx = buildContext(patient, { date });
+  const res = await callModel(user, 'draft_note_from_dictation', {
+    context: ctx,
+    template: { sections: template.sections },
+    transcript: working,
+    note_date: date,
+  });
+  const { output, issues } = checked(() =>
+    V.validateNoteFromDictation(res.json, ctx, template, working, date));
+  const unresolved = output.sections.reduce((n, s) => n + s.flags.length, 0);
+  audit(user.id, 'note_from_dictation', {
+    patient_id: patient.id,
+    detail: { note_type: noteType, source_ids: sourceIds, transcript_chars: working.length, model: res.model },
+  });
+  return saveArtifact({
+    user, patient, operation: `draft_note:${noteType}`,
+    content: {
+      note_type: noteType,
+      note_date: date,
+      ...output,
+      unresolved_flags: unresolved,
+      scribe_mode: 'from_dictation',
+      transcript: working,
+      media_model: res.model,
+      fed_from_sources: sourceIds.map((id) => ({ source_id: id, field: 'transcript' })),
     },
     issues, res, templateVersion: `${template.key}@v${template.version}`,
   });

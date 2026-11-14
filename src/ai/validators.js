@@ -459,4 +459,171 @@ export function validateConsiderations(raw, ctx) {
   return { output: { considerations: out }, issues };
 }
 
+/* ------------------------------------------------------------------ note from dictation (scribe) */
+
+const NEGATION_WORDS = /\b(no|not|denies|denied|without|never|none|negative|nor)\b/i;
+const STOP = new Set(('a an the and or but if then of to in on at for with from by is was were be been being this that these those it its he she they we you i um uh like just had have has'.split(' ')));
+/** Tunable: fraction of content words in the sentence that must appear in cited spans. */
+export const SCRIBE_WORD_OVERLAP = 0.45;
+
+function normalizeSpans(spans, transcriptLen) {
+  const out = [];
+  for (const s of Array.isArray(spans) ? spans : []) {
+    const start = Number(s?.start);
+    const end = Number(s?.end);
+    if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
+    if (start < 0 || end > transcriptLen || start >= end) continue;
+    out.push({ start, end });
+  }
+  return out;
+}
+
+function citedText(transcript, spans) {
+  return spans.map((s) => transcript.slice(s.start, s.end)).join(' ');
+}
+
+function contentWords(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s./%-]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP.has(w));
+}
+
+function wordOverlapOk(sentence, cited, threshold = SCRIBE_WORD_OVERLAP) {
+  const words = contentWords(sentence);
+  if (!words.length) return true;
+  const hay = new Set(contentWords(cited));
+  const hit = words.filter((w) => hay.has(w)).length;
+  return hit / words.length >= threshold;
+}
+
+function negationPreserved(sentence, cited) {
+  if (!NEGATION_WORDS.test(cited)) return true;
+  return NEGATION_WORDS.test(sentence);
+}
+
+/**
+ * Scribe note from one transcript. Keeps only sentences with valid transcript
+ * spans (or fact_ids for facts sections); drops invented numbers/entities.
+ */
+export function validateNoteFromDictation(raw, ctx, template, transcript, noteDate, { wordOverlap = SCRIBE_WORD_OVERLAP } = {}) {
+  const issues = [];
+  const ck = makeChecker(ctx);
+  const t = String(transcript || '');
+  const byKey = new Map((Array.isArray(raw?.sections) ? raw.sections : []).map((s) => [s?.key, s]));
+  const missing = [...(ctx.missing_information || [])].filter((m) => m !== 'clinician_plan');
+  const needsClarification = [];
+
+  for (const item of Array.isArray(raw?.needs_clarification) ? raw.needs_clarification : []) {
+    const phrase = typeof item?.phrase === 'string' ? item.phrase.trim().slice(0, 300) : '';
+    const question = typeof item?.question === 'string' ? item.question.trim().slice(0, 300) : '';
+    const spans = normalizeSpans(item?.spans, t.length);
+    if (!phrase || !question || !spans.length) {
+      issues.push({ code: 'bad_clarification' });
+      continue;
+    }
+    const cited = citedText(t, spans);
+    if (!norm(cited).includes(norm(phrase).slice(0, 40)) && !norm(phrase).includes(norm(cited).slice(0, 40))) {
+      // Phrase should roughly match the cited span; drop if totally unrelated.
+      issues.push({ code: 'clarification_span_mismatch' });
+      continue;
+    }
+    needsClarification.push({ phrase, question, spans });
+  }
+
+  const sections = [];
+  for (const tmpl of template.sections) {
+    const rs = byKey.get(tmpl.key);
+    const flags = [];
+    const kept = [];
+    const isFacts = tmpl.source === 'facts' || tmpl.source === 'facts_and_exam';
+    const isClinician = !isFacts;
+
+    for (const sent of Array.isArray(rs?.sentences) ? rs.sentences : []) {
+      const text = typeof sent?.text === 'string' ? sent.text.trim() : '';
+      if (!text) continue;
+      const spans = normalizeSpans(sent?.spans, t.length);
+      const factIds = (Array.isArray(sent?.fact_ids) ? sent.fact_ids : []).filter((id) => ck.facts.has(id));
+
+      if (isClinician || tmpl.source === 'facts_and_exam') {
+        if (!spans.length && !(tmpl.source === 'facts_and_exam' && factIds.length)) {
+          issues.push({ code: 'sentence_dropped_no_span', where: tmpl.key });
+          continue;
+        }
+        if (spans.length) {
+          const cited = citedText(t, spans);
+          const badNums = unsupportedNumbers(text, `${cited} ${noteDate || ''}`);
+          if (badNums.length) {
+            issues.push({ code: 'invented_number', where: tmpl.key, numbers: badNums });
+            continue;
+          }
+          if (!wordOverlapOk(text, cited, wordOverlap)) {
+            issues.push({ code: 'word_overlap_failed', where: tmpl.key });
+            continue;
+          }
+          if (!negationPreserved(text, cited)) {
+            issues.push({ code: 'negation_lost', where: tmpl.key });
+            continue;
+          }
+        }
+      }
+
+      if (tmpl.source === 'facts') {
+        if (!factIds.length) {
+          issues.push({ code: 'sentence_dropped_no_facts', where: tmpl.key });
+          continue;
+        }
+        const bad = unsupportedNumbers(text, ck.allowedFor(factIds, noteDate || ''));
+        if (bad.length) {
+          issues.push({ code: 'invented_number', where: tmpl.key, numbers: bad });
+          continue;
+        }
+      }
+
+      if (CONVERSATIONAL.test(text)) {
+        issues.push({ code: 'conversational_text', where: tmpl.key });
+        continue;
+      }
+      kept.push({ text, spans, fact_ids: factIds });
+    }
+
+    let text = kept.map((s) => s.text).join(' ');
+    let fact_ids = [...new Set(kept.flatMap((s) => s.fact_ids))];
+    if (!kept.length) {
+      if (isClinician) {
+        text = `[${tmpl.title} not entered]`;
+        missing.push(tmpl.source === 'clinician_history' ? `clinician_history_${tmpl.key}` : `clinician_${INPUT_FOR[tmpl.source] || tmpl.key}`);
+        fact_ids = [];
+      } else {
+        text = `[${tmpl.title} not entered]`;
+        missing.push(`section_${tmpl.key}`);
+        fact_ids = [];
+      }
+    }
+    if (flags.length) issues.push({ code: 'section_flagged', where: tmpl.key });
+    sections.push({
+      key: tmpl.key,
+      title: tmpl.title,
+      source: tmpl.source,
+      text,
+      fact_ids,
+      flags,
+      edited: false,
+      sentences: kept,
+    });
+  }
+
+  return {
+    output: {
+      sections,
+      needs_clarification: needsClarification,
+      missing_information: [...new Set([...missing, ...strs(raw?.missing_information)])],
+      conflicts: ctx.conflicts || [],
+      proposed_considerations: [],
+    },
+    issues,
+  };
+}
+
 export { numbersIn };
