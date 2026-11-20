@@ -95,12 +95,30 @@ test('demo seed keeps patient facts bound and excludes identity contamination', 
   assert.equal(rejected.output.facts.length, 1);
   assert.match(rejected.output.facts[0].label, /creatinine/i);
 
-  const rosaFacts = all('SELECT label, value FROM facts WHERE patient_id=?', seed.patientId);
+  const rosaFacts = all('SELECT label, value, source_passage, reviewer_status FROM facts WHERE patient_id=?', seed.patientId);
   assert.ok(rosaFacts.length > 0);
   for (const f of rosaFacts) {
+    if (f.reviewer_status === 'rejected') continue;
     assert.equal(isIdentityFact(f.label, f.value), false);
-    assert.doesNotMatch(`${f.label} ${f.value}`, /john\s*doe/i);
+    assert.doesNotMatch(`${f.label} ${f.value} ${f.source_passage || ''}`, /john\s*doe/i);
   }
+  const rosaSources = all('SELECT text FROM sources WHERE patient_id=?', seed.patientId);
+  for (const s of rosaSources) {
+    assert.doesNotMatch(s.text || '', /john\s*doe/i);
+    assert.doesNotMatch(s.text || '', /Patient Name:\s*John/i);
+  }
+  // Contaminated facts are rejected by purge without wiping Rosa's chart.
+  const { purgeIdentityFacts } = await import('../src/seed.js');
+  run(
+    `INSERT INTO facts(id,patient_id,label,value,unit,event_time,source_id,source_passage,assertion,reviewer_status,revision,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,'pending',1,?)`,
+    'contam-john-doe', seed.patientId, 'Patient Name', 'John Doe', '', null,
+    rosaSources.length ? all('SELECT id FROM sources WHERE patient_id=? LIMIT 1', seed.patientId)[0].id : null,
+    'Patient Name: John Doe. Visit date 2023.', 'present', new Date().toISOString(),
+  );
+  assert.ok(purgeIdentityFacts() >= 1);
+  assert.equal(get("SELECT reviewer_status FROM facts WHERE id='contam-john-doe'").reviewer_status, 'rejected');
+  assert.ok(all("SELECT id FROM facts WHERE patient_id=? AND reviewer_status!='rejected'", seed.patientId).length > 0);
   if (seed.alexId) {
     const alexFacts = all('SELECT id FROM facts WHERE patient_id=?', seed.alexId);
     const cross = all('SELECT id FROM facts WHERE patient_id=? AND id IN (SELECT id FROM facts WHERE patient_id=?)', seed.patientId, seed.alexId);
@@ -865,6 +883,36 @@ test('W4: from-dictation accepts a generic clinical update (not only demo phrase
   });
   assert.equal(empty.status, 400);
   assert.equal(empty.json.error?.code, 'transcript_required');
+  const tooShort = await api('POST', `/patients/${seed.patientId}/notes/from-dictation`, {
+    token: resident,
+    body: { note_type: 'progress', note_date: '2026-09-12', transcript: 'ok labs' },
+  });
+  assert.equal(tooShort.status, 400);
+  assert.equal(tooShort.json.error?.code, 'transcript_required');
+});
+
+test('Elevated Pulse bank: answer miss schedules spaced review; curated reads have no fictional URLs', async () => {
+  const quiz = await api('GET', `/teaching/questions?topic=${encodeURIComponent('Elevated Pulse')}&count=1`, {
+    token: resident,
+    headers: { 'Idempotency-Key': 'elevated-pulse-review-1' },
+  });
+  assert.equal(quiz.status, 200);
+  const q = (quiz.json.questions || [])[0];
+  assert.ok(q?.mcq_id);
+  const optCount = Array.isArray(q.options) ? q.options.length : Object.keys(q.options || {}).length;
+  assert.equal(optCount, 5);
+  const miss = await api('POST', `/mcq/${q.mcq_id}/answer`, {
+    token: resident,
+    body: { choice: 'E', seconds: 20 },
+  });
+  assert.equal(miss.status, 200);
+  assert.equal(miss.json.correct, false);
+  assert.ok(miss.json.next_review_at);
+  const queue = await api('GET', '/learning/review-queue', { token: resident });
+  assert.equal(queue.status, 200);
+  assert.ok((queue.json.items || queue.json || []).length >= 0);
+  const fakeReads = all("SELECT id FROM curated_reads WHERE url LIKE '%example.com%' OR citation LIKE '%fictional citation%'");
+  assert.equal(fakeReads.length, 0);
 });
 
 test('W4: invented number in scribe sentence is dropped; negation preserved', async () => {

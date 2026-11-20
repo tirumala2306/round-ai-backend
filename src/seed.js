@@ -198,6 +198,8 @@ export async function ensureRosaDemoCase() {
     seedRosaStructuredPlan({ patientId, adminId: admin.id, now });
   }
   ensureElevatedPulseBank();
+  // Safe cleanup only: reject identity facts / scrub John Doe lines under Rosa.
+  purgeIdentityFacts();
   return { patientId };
 }
 
@@ -245,15 +247,37 @@ async function seedPatientFacts({ patientId, sources, now }) {
 }
 
 /**
- * All data here is fictional. Never put real patient data into a development database.
- * If a prior demo DB is contaminated (wrong-patient facts), delete the SQLite file and re-run seed.
+ * Reject identity / demographics facts and scrub demo contamination (e.g. John Doe)
+ * from fact labels, values, and source passages. Does not delete patients or users.
  */
 export function purgeIdentityFacts() {
-  const rows = all('SELECT id, label, value FROM facts');
+  const rows = all('SELECT id, label, value, source_passage FROM facts');
   let n = 0;
   for (const f of rows) {
-    if (isIdentityFact(f.label, f.value)) {
-      run("UPDATE facts SET reviewer_status='rejected' WHERE id=?", f.id);
+    const passage = f.source_passage || '';
+    const contaminated = isIdentityFact(f.label, f.value)
+      || isIdentityFact(f.label, passage)
+      || /\bjohn\s*doe\b|\bjane\s*doe\b/i.test(`${f.label} ${f.value} ${passage}`)
+      || (/visit|admit|encounter/i.test(f.label) && /\b2023\b/.test(String(f.value || '')));
+    if (contaminated) {
+      run("UPDATE facts SET reviewer_status='rejected' WHERE id=? AND reviewer_status!='rejected'", f.id);
+      n += 1;
+    }
+  }
+  // Scrub identity header lines from source text without deleting the clinical remainder.
+  const sources = all('SELECT id, text FROM sources');
+  for (const s of sources) {
+    const text = String(s.text || '');
+    if (!/\b(patient\s*name|john\s*doe|jane\s*doe|visit\s*date)\b/i.test(text)) continue;
+    const cleaned = text
+      .split(/\r?\n/)
+      .filter((line) => !/\b(patient\s*name\s*:|john\s*doe|jane\s*doe|visit\s*date\s*:)/i.test(line))
+      .join('\n')
+      .replace(/\bPatient Name:\s*John Doe\.?\s*/gi, '')
+      .replace(/\bVisit Date:\s*2023[^\n.]*/gi, '')
+      .trim();
+    if (cleaned !== text.trim()) {
+      run('UPDATE sources SET text=? WHERE id=?', cleaned, s.id);
       n += 1;
     }
   }
@@ -271,7 +295,9 @@ export async function seedDemo() {
   // Existing DBs: drop identity leakage, backfill learning, ensure Rosa demo case.
   if (get('SELECT 1 AS x FROM users LIMIT 1')) {
     const purged = purgeIdentityFacts();
-    if (purged) console.log(`Purged ${purged} identity fact(s) from existing demo DB.`);
+    if (purged) console.log(`Purged ${purged} identity fact(s) / scrubbed source line(s) from existing demo DB.`);
+    // Drop demo curated reads that used fictional example.com URLs (not verified PubMed).
+    run("DELETE FROM curated_reads WHERE url LIKE '%example.com%' OR citation LIKE '%fictional citation%'");
     ensureElevatedPulseBank();
     await ensureRosaDemoCase();
     return null;
@@ -354,6 +380,7 @@ export async function seedDemo() {
       'Chronic kidney disease stage 5 requiring immediate dialysis',
       'Lab error; ignore until the next admission',
       'Expected rise from antibiotics alone',
+      'Ignore oliguria until the next discharge summary',
     ],
     correctIndex: 0,
     explanations: [
@@ -361,26 +388,13 @@ export async function seedDemo() {
       'Nothing in the vignette establishes CKD stage 5 or an immediate dialysis indication.',
       'Do not discard a verified trend without clinical review.',
       'Antibiotics can contribute but do not make the rise “expected” without assessment.',
+      'Oliguria with a rising creatinine belongs in today’s assessment, not deferred to discharge.',
     ],
     now,
   });
 
-  run(
-    `INSERT INTO curated_reads(id,topic,topic_key,title,citation,url,pmid,why_it_matters,added_by,approved,approved_by,approved_at,created_at)
-     VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?)`,
-    uid(),
-    'Elevated Pulse',
-    topicKey('Elevated Pulse'),
-    'Approach to tachycardia in acute illness (educational)',
-    'Demo curated read — fictional citation for offline demos',
-    'https://example.com/demo-tachycardia',
-    null,
-    'Links vital-sign change to oxygen delivery and volume before labeling a rhythm diagnosis.',
-    admin,
-    admin,
-    now,
-    now,
-  );
+  // Intentionally no fictional PubMed / example.com curated reads.
+  // Learning evidence must come from validated PubMed retrieval or admin-approved real citations.
 
   return { teamA, teamB, admin, resident, other, patientId, alexId };
 }

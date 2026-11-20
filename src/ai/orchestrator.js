@@ -581,9 +581,11 @@ export async function draftNoteFromDictation({ user, patient, input }) {
       const t = str(s.text, 100_000);
       if (t) chunks.push(t);
     }
-    transcript = chunks.join('\n\n');
+    transcript = chunks.join('\n\n').trim();
   }
-  need(transcript, 400, 'transcript_required', 'Provide transcript text or source_ids with text');
+  // Whitespace-only or a couple of characters is not a usable clinical update.
+  need(transcript && transcript.length >= 12, 400, 'transcript_required',
+    'Enter a usable clinical update (at least a short sentence) before writing the note.');
 
   const clarifications = Array.isArray(input.clarifications) ? input.clarifications : [];
   let working = transcript;

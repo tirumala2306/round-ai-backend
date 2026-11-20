@@ -349,7 +349,8 @@ export function patientRoutes(r) {
     content.unresolved_flags = content.sections.reduce((n, s) => n + s.flags.length, 0);
     const version = get('SELECT MAX(version) AS v FROM artifact_versions WHERE artifact_id=?', a.id).v + 1;
     tx(() => {
-      run("UPDATE artifacts SET content=?, review_state='draft', reviewed_by=NULL, reviewed_at=NULL, updated_at=? WHERE id=?", JSON.stringify(content), nowIso(), a.id);
+      // Clinician edits clear soft-AI "partial" so review reflects human-owned draft text.
+      run("UPDATE artifacts SET content=?, status='draft', review_state='draft', reviewed_by=NULL, reviewed_at=NULL, updated_at=? WHERE id=?", JSON.stringify(content), nowIso(), a.id);
       run('INSERT INTO artifact_versions(id,artifact_id,version,content,edited_by,created_at) VALUES(?,?,?,?,?,?)', uid(), a.id, version, JSON.stringify(content), user.id, nowIso());
     });
     audit(user.id, 'artifact_edit', { patient_id: a.patient_id, artifact_id: a.id, detail: { version } });
