@@ -10,8 +10,30 @@ export class HttpError extends Error {
 }
 
 export const uid = () => crypto.randomUUID();
-export const nowIso = () => new Date().toISOString();
-export const today = () => new Date().toISOString().slice(0, 10);
+
+/** Demo time-travel: DEMO_MODE=true + DEMO_CLOCK_ISO (ISO timestamp). */
+export function demoModeEnabled() {
+  return String(process.env.DEMO_MODE || '').toLowerCase() === 'true';
+}
+
+export function demoClockIso() {
+  const raw = String(process.env.DEMO_CLOCK_ISO || '').trim();
+  return raw || null;
+}
+
+function clockMs() {
+  if (demoModeEnabled()) {
+    const iso = demoClockIso();
+    if (iso) {
+      const t = Date.parse(iso);
+      if (!Number.isNaN(t)) return t;
+    }
+  }
+  return Date.now();
+}
+
+export const nowIso = () => new Date(clockMs()).toISOString();
+export const today = () => new Date(clockMs()).toISOString().slice(0, 10);
 export const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 export const need = (cond, status, code, message, extra) => { if (!cond) throw new HttpError(status, code, message, extra); };
 export const str = (v, max = 20000) => (typeof v === 'string' ? v.trim().slice(0, max) : '');

@@ -9,6 +9,7 @@ const { createApp } = await import('../src/server.js');
 const { seedDemo, DEMO_PASSWORD } = await import('../src/seed.js');
 const { setEvidenceFetch } = await import('../src/evidence/pubmed.js');
 const { validateExtractFacts, validateSummary, isIdentityFact } = await import('../src/ai/validators.js');
+const { AdapterError, setGenerateHook } = await import('../src/ai/adapter.js');
 const { get, all, run } = await import('../src/db.js');
 
 let server; let base; let seed;
@@ -117,7 +118,7 @@ test('demo seed keeps patient facts bound and excludes identity contamination', 
     'Patient Name: John Doe. Visit date 2023.', 'present', new Date().toISOString(),
   );
   assert.ok(purgeIdentityFacts() >= 1);
-  assert.equal(get("SELECT reviewer_status FROM facts WHERE id='contam-john-doe'").reviewer_status, 'rejected');
+  assert.equal(get("SELECT id FROM facts WHERE id='contam-john-doe'"), undefined);
   assert.ok(all("SELECT id FROM facts WHERE patient_id=? AND reviewer_status!='rejected'", seed.patientId).length > 0);
   if (seed.alexId) {
     const alexFacts = all('SELECT id FROM facts WHERE patient_id=?', seed.alexId);
@@ -891,6 +892,80 @@ test('W4: from-dictation accepts a generic clinical update (not only demo phrase
   assert.equal(tooShort.json.error?.code, 'transcript_required');
 });
 
+test('P4: extract binds facts to route patient; other-patient source rejected', async () => {
+  const { extractFacts } = await import('../src/ai/orchestrator.js');
+  const patient = get('SELECT * FROM patients WHERE id=?', seed.patientId);
+  const other = all('SELECT id FROM patients WHERE id!=? LIMIT 1', seed.patientId)[0];
+  assert.ok(other?.id);
+  let foreignSource = all('SELECT * FROM sources WHERE patient_id=? LIMIT 1', other.id)[0];
+  if (!foreignSource) {
+    const sid = crypto.randomUUID();
+    run(
+      "INSERT INTO sources(id,patient_id,kind,title,event_time,uploaded_at,text) VALUES(?,?,?,?,?,?,?)",
+      sid, other.id, 'note', 'Foreign', '2026-11-24T08:00', new Date().toISOString(), 'Creatinine 1.0',
+    );
+    foreignSource = get('SELECT * FROM sources WHERE id=?', sid);
+  }
+  await assert.rejects(
+    () => extractFacts({
+      user: { id: 'u-test', role: 'resident' },
+      patient,
+      source: foreignSource,
+    }),
+    (e) => e?.status === 400 && e?.code === 'patient_mismatch',
+  );
+});
+
+test('P4: plan-proposals endpoint returns array after extract', async () => {
+  const r = await api('GET', `/patients/${seed.patientId}/plan-proposals`, { token: resident });
+  assert.equal(r.status, 200);
+  assert.ok(Array.isArray(r.json.proposals));
+  assert.ok(Array.isArray(r.json.warnings));
+});
+
+test('patient_status snapshot is returned on fact review', async () => {
+  const ids = all(
+    "SELECT id FROM facts WHERE patient_id=? AND reviewer_status='pending' LIMIT 1",
+    seed.patientId,
+  ).map((r) => r.id);
+  assert.ok(ids.length, 'seed should include at least one pending fact');
+  const r = await api('POST', `/patients/${seed.patientId}/facts/review`, {
+    token: resident,
+    body: { fact_ids: ids, status: 'confirmed' },
+  });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.patient_status);
+  assert.equal(r.json.patient_status.patient_id, seed.patientId);
+  assert.equal(typeof r.json.patient_status.unreviewed_facts, 'number');
+  assert.equal(typeof r.json.patient_status.open_tasks, 'number');
+  assert.ok(r.json.patient_status.summary_state);
+});
+
+test('W4: from-dictation maps adapter failure to 502 ai_unavailable and keeps request_id', async () => {
+  setGenerateHook(async () => {
+    throw new AdapterError('forced provider outage', { retryable: false, status: 503 });
+  });
+  try {
+    const before = Number(get('SELECT COUNT(*) AS n FROM artifacts')?.n || 0);
+    const r = await api('POST', `/patients/${seed.patientId}/notes/from-dictation`, {
+      token: resident,
+      body: {
+        note_type: 'progress',
+        note_date: '2026-09-12',
+        transcript: 'Overnight oxygen need increased on 2 L nasal cannula with plan for labs.',
+      },
+      headers: { 'Idempotency-Key': 'dictation-adapter-fail-1', 'X-Request-Id': 'support-dict-fail1' },
+    });
+    assert.equal(r.status, 502);
+    assert.equal(r.json.error?.code, 'ai_unavailable');
+    assert.equal(r.json.error?.request_id, 'support-dict-fail1');
+    const after = Number(get('SELECT COUNT(*) AS n FROM artifacts')?.n || 0);
+    assert.equal(after, before, 'adapter failure must not persist a note artifact');
+  } finally {
+    setGenerateHook(null);
+  }
+});
+
 test('Elevated Pulse bank: answer miss schedules spaced review; curated reads have no fictional URLs', async () => {
   const quiz = await api('GET', `/teaching/questions?topic=${encodeURIComponent('Elevated Pulse')}&count=1`, {
     token: resident,
@@ -907,10 +982,24 @@ test('Elevated Pulse bank: answer miss schedules spaced review; curated reads ha
   });
   assert.equal(miss.status, 200);
   assert.equal(miss.json.correct, false);
+  assert.ok(miss.json.correct_answer);
+  assert.ok(miss.json.explanation || (miss.json.option_explanations && Object.keys(miss.json.option_explanations).length));
   assert.ok(miss.json.next_review_at);
+  const hit = await api('POST', `/mcq/${q.mcq_id}/answer`, {
+    token: resident,
+    body: { choice: miss.json.correct_answer, seconds: 10 },
+  });
+  assert.equal(hit.status, 200);
+  assert.equal(hit.json.correct, true);
+  const miss2 = await api('POST', `/mcq/${q.mcq_id}/answer`, {
+    token: resident,
+    body: { choice: 'E', seconds: 8 },
+  });
+  assert.equal(miss2.status, 200);
   const queue = await api('GET', '/learning/review-queue', { token: resident });
   assert.equal(queue.status, 200);
-  assert.ok((queue.json.items || queue.json || []).length >= 0);
+  const due = queue.json.items || queue.json || [];
+  assert.ok(Array.isArray(due) && due.some((row) => row.mcq_id === q.mcq_id));
   const fakeReads = all("SELECT id FROM curated_reads WHERE url LIKE '%example.com%' OR citation LIKE '%fictional citation%'");
   assert.equal(fakeReads.length, 0);
 });

@@ -25,9 +25,51 @@ export function saveMcq({ user, topic, difficulty, stage, content, validation, m
   return id;
 }
 
+const LETTERS = ['A', 'B', 'C', 'D', 'E'];
+
+/**
+ * Seed MCQs historically used correct_index + explanations[]; AI uses answer + option_explanations.
+ * Normalize so grading and learner feedback always see one shape.
+ */
+export function normalizeMcqContent(raw) {
+  const c = raw && typeof raw === 'object' ? { ...raw } : {};
+  const options = Array.isArray(c.options)
+    ? c.options.map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 5)
+    : LETTERS.map((L) => (c.options && typeof c.options === 'object' ? String(c.options[L] ?? '').trim() : '')).filter(Boolean);
+
+  let answer = typeof c.answer === 'string' ? c.answer.trim().toUpperCase() : '';
+  if (!LETTERS.includes(answer) && Number.isInteger(c.correct_index) && c.correct_index >= 0 && c.correct_index < LETTERS.length) {
+    answer = LETTERS[c.correct_index];
+  }
+
+  let option_explanations = c.option_explanations && typeof c.option_explanations === 'object'
+    ? { ...c.option_explanations }
+    : {};
+  if (Array.isArray(c.explanations)) {
+    c.explanations.forEach((text, i) => {
+      if (i >= LETTERS.length) return;
+      const t = String(text ?? '').trim();
+      if (t) option_explanations[LETTERS[i]] = t;
+    });
+  }
+  const explanation = typeof c.explanation === 'string' && c.explanation.trim()
+    ? c.explanation.trim()
+    : (answer && option_explanations[answer]) || '';
+
+  return {
+    ...c,
+    options: options.length ? options : c.options,
+    answer,
+    explanation,
+    option_explanations,
+    learning_objective: typeof c.learning_objective === 'string' ? c.learning_objective : (c.learningObjective || ''),
+    evidence: Array.isArray(c.evidence) ? c.evidence : [],
+  };
+}
+
 /** What the learner sees BEFORE answering: no key, no explanations. */
 export function publicMcq(row) {
-  const c = jsonParse(row.content, {});
+  const c = normalizeMcqContent(jsonParse(row.content, {}));
   return {
     mcq_id: row.id, topic: row.topic, topic_key: row.topic_key || topicKey(row.topic),
     difficulty: row.difficulty, stage: row.stage, status: row.status, source: row.source || 'ai_generated',
@@ -58,16 +100,24 @@ export function getMcqForLearner(id) {
 
 export function answerMcq({ user, mcqId, choice, seconds, confidence }) {
   const row = getMcqForLearner(mcqId);
-  const c = jsonParse(row.content, {});
+  const c = normalizeMcqContent(jsonParse(row.content, {}));
   need(['A', 'B', 'C', 'D', 'E'].includes(choice), 400, 'bad_choice', 'choice must be A-E');
+  need(LETTERS.includes(c.answer), 500, 'mcq_corrupt', 'This question has no answer key. Report it and try another.');
   const correct = choice === c.answer ? 1 : 0;
   const prev = get('SELECT * FROM attempts WHERE user_id=? AND mcq_id=? ORDER BY created_at DESC LIMIT 1', user.id, mcqId);
   const intervals = reviewIntervals();
   let stage = null;
   let next = null;
-  const addDays = (d) => new Date(Date.now() + d * 86400_000).toISOString();
-  if (!correct) { stage = 0; next = addDays(intervals[0]); }
-  else if (prev && prev.next_review_at !== null && prev.review_stage !== null) {
+  const addDays = (d) => {
+    const days = Number(d);
+    if (!Number.isFinite(days) || days <= 0) return nowIso();
+    return new Date(Date.now() + days * 86400_000).toISOString();
+  };
+  if (!correct) {
+    // First miss is due immediately so Review queue is demonstrable the same session.
+    stage = 0;
+    next = nowIso();
+  } else if (prev && prev.next_review_at !== null && prev.review_stage !== null) {
     stage = prev.review_stage + 1;
     next = stage < intervals.length ? addDays(intervals[stage]) : null;
   }
@@ -89,7 +139,7 @@ export function reviewQueue(user) {
        AND a.created_at=(SELECT MAX(created_at) FROM attempts WHERE user_id=a.user_id AND mcq_id=a.mcq_id)
        AND a.next_review_at<=?
      ORDER BY a.next_review_at`, user.id, nowIso());
-  return rows;
+  return { items: rows, note: 'Due now. Missed approved questions appear here for spaced review (then 1 / 3 / 7 days).' };
 }
 
 export function reportIssue({ user, mcqId, note }) {

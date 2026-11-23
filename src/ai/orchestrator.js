@@ -84,13 +84,34 @@ function saveArtifact({ user, patient, operation, content, issues = [], res, tem
 /* ------------------------------------------------------------------ operations */
 
 export async function extractFacts({ user, patient, source, lowLegibilityLines = [] }) {
-  const res = await callModel(user, 'extract_facts', { source: { id: source.id, kind: source.kind, event_time: source.event_time, text: source.text } });
-  const { output, issues } = checked(() => V.validateExtractFacts(res.json, source, { lowLegibilityLines }));
+  // Facts must stay on the same patient as their source (never cross-attach).
+  need(source?.patient_id === patient.id, 400, 'patient_mismatch', 'Source does not belong to this patient.');
+  const problems = all(
+    "SELECT id,label,state FROM problems WHERE patient_id=? AND state!='rejected'",
+    patient.id,
+  );
+  const admission = get(
+    "SELECT event_time FROM sources WHERE patient_id=? AND kind='admission_note' ORDER BY event_time LIMIT 1",
+    patient.id,
+  );
+  const res = await callModel(user, 'extract_facts', {
+    source: { id: source.id, kind: source.kind, event_time: source.event_time, text: source.text },
+    patient: { display_name: patient.display_name },
+    problems: problems.map((p) => ({ id: p.id, label: p.label, state: p.state })),
+  });
+  const { output, issues } = checked(() => V.validateExtractFacts(res.json, source, {
+    lowLegibilityLines,
+    patientDisplayName: patient.display_name,
+    admissionIso: admission?.event_time || null,
+    todayIso: today(),
+    problems,
+  }));
   const ids = tx(() => output.facts.map((f) => {
     const id = uid();
-    run(`INSERT INTO facts(id,patient_id,label,value,unit,event_time,source_id,source_passage,assertion,reviewer_status,revision,created_at)
-         VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)`,
-      id, patient.id, f.label, f.value, f.unit, f.event_time, source.id, f.source_passage, f.assertion, patient.revision, nowIso());
+    run(`INSERT INTO facts(id,patient_id,label,value,unit,event_time,source_id,source_passage,assertion,reviewer_status,qualifier,warnings_json,revision,created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)`,
+      id, patient.id, f.label, f.value, f.unit, f.event_time, source.id, f.source_passage, f.assertion,
+      f.qualifier || null, JSON.stringify(f.warnings || []), patient.revision, nowIso());
     return id;
   }));
   return saveArtifact({
@@ -98,6 +119,8 @@ export async function extractFacts({ user, patient, source, lowLegibilityLines =
     content: {
       source_id: source.id, fact_ids: ids, rejected_count: issues.length,
       missing_information: output.missing_information || [],
+      warnings: output.warnings || [],
+      plan_proposals: output.plan_proposals || [],
     },
     issues, res,
   });

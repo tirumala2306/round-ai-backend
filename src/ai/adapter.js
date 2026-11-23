@@ -14,6 +14,10 @@ export class AdapterError extends Error {
 let fetchImpl = (...a) => fetch(...a);
 export const setModelFetch = (f) => { fetchImpl = f; };
 
+/** Test-only override for `generate` (null restores normal provider path). */
+let generateHook = null;
+export const setGenerateHook = (fn) => { generateHook = typeof fn === 'function' ? fn : null; };
+
 function parseResponseText(data) {
   return (data.output || [])
     .filter((o) => o.type === 'message')
@@ -149,6 +153,7 @@ async function openaiExtractFromImage({ imageBase64, mimeType }) {
 
 /** One bounded retry for transient failures. */
 export async function generate(args) {
+  if (generateHook) return generateHook(args);
   const fn = config.provider === 'openai' ? openaiGenerate : mockGenerate;
   try {
     return await fn(args);

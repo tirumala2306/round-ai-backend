@@ -49,28 +49,68 @@ export function parsePlanRecord(planRow) {
     };
   }
   const plain = String(planRow.text).trim();
+  // Migrate legacy free-text into one "General" block (Prompt 8 §5.8).
+  const migrated = plain
+    ? normalizeItems([{
+      problem_id: null,
+      label: 'General',
+      assessment: '',
+      plan: plain,
+      source: 'clinician',
+      status: 'edited',
+      manually_edited: true,
+    }])
+    : [];
   return {
     include_icd: false,
-    items: plain
-      ? [{ problem_id: null, label: '', assessment: '', plan: plain, code: null }]
-      : [],
+    items: migrated,
     plain_text: plain,
-    structured: null,
+    structured: migrated.length
+      ? { version: 1, include_icd: false, items: migrated }
+      : null,
     plan_date: planRow.plan_date,
+    migrated_from_plain: !!migrated.length,
   };
 }
 
 function normalizeItems(items) {
   if (!Array.isArray(items)) return [];
-  return items.slice(0, 40).map((it) => ({
-    problem_id: typeof it?.problem_id === 'string' ? it.problem_id.slice(0, 64) : null,
-    label: String(it?.label || '').trim().slice(0, 200),
-    assessment: String(it?.assessment || '').trim().slice(0, 4000),
-    plan: String(it?.plan || '').trim().slice(0, 4000),
-    code: typeof it?.code === 'string' && it.code.trim()
-      ? it.code.trim().toUpperCase().slice(0, 16)
-      : null,
-  })).filter((it) => it.label || it.assessment || it.plan);
+  return items.slice(0, 40).map((it) => {
+    const source = ['clinician', 'dictation_proposal'].includes(it?.source)
+      ? it.source
+      : 'clinician';
+    const status = ['draft', 'proposed', 'accepted', 'edited'].includes(it?.status)
+      ? it.status
+      : (source === 'dictation_proposal' ? 'proposed' : 'draft');
+    return {
+      problem_id: typeof it?.problem_id === 'string' ? it.problem_id.slice(0, 64) : null,
+      label: String(it?.label || '').trim().slice(0, 200),
+      assessment: String(it?.assessment || it?.assessment_text || '').trim().slice(0, 4000),
+      plan: String(it?.plan || it?.plan_text || '').trim().slice(0, 4000),
+      code: typeof it?.code === 'string' && it.code.trim()
+        ? it.code.trim().toUpperCase().slice(0, 16)
+        : null,
+      source,
+      status,
+      manually_edited: !!it?.manually_edited,
+      updated_at: typeof it?.updated_at === 'string' ? it.updated_at.slice(0, 40) : null,
+    };
+  }).filter((it) => it.label || it.assessment || it.plan);
+}
+
+/** Accepted ICD only — never attach suggested-but-unreviewed codes to copy/render. */
+export function acceptedCodeFromSuggestion(sug) {
+  if (!sug || typeof sug !== 'object') return null;
+  if (!sug.code) return null;
+  // Accepted rows carry accepted_at; raw suggest payloads do not.
+  if (sug.accepted_at || sug.coding_status === 'accepted') {
+    return String(sug.code).trim().toUpperCase().slice(0, 16) || null;
+  }
+  // Legacy stored suggestions without accepted_at still count once on the problem.
+  if (sug.accepted_by || sug.fy != null) {
+    return String(sug.code).trim().toUpperCase().slice(0, 16) || null;
+  }
+  return null;
 }
 
 /**
@@ -93,7 +133,7 @@ export function renderPlanText(structured, { problems = [] } = {}) {
       const sug = p?.code_suggestion
         ? (typeof p.code_suggestion === 'string' ? jsonParse(p.code_suggestion, null) : p.code_suggestion)
         : null;
-      if (sug?.code) code = String(sug.code).toUpperCase();
+      code = acceptedCodeFromSuggestion(sug);
     }
     const title = it.label
       ? (includeIcd && code ? `${it.label} (${code})` : it.label)
@@ -121,7 +161,8 @@ export function buildStructuredFromBody(body, { problems = [] } = {}) {
         const sug = p?.code_suggestion
           ? (typeof p.code_suggestion === 'string' ? jsonParse(p.code_suggestion, null) : p.code_suggestion)
           : null;
-        if (sug?.code) it.code = String(sug.code).toUpperCase();
+        const accepted = acceptedCodeFromSuggestion(sug);
+        if (accepted) it.code = accepted;
       }
     } else {
       for (const it of items) it.code = null;

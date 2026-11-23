@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS facts(
   id TEXT PRIMARY KEY, patient_id TEXT NOT NULL, label TEXT NOT NULL, value TEXT NOT NULL, unit TEXT,
   event_time TEXT, source_id TEXT NOT NULL, source_passage TEXT NOT NULL,
   assertion TEXT NOT NULL DEFAULT 'present', reviewer_status TEXT NOT NULL DEFAULT 'pending',
+  qualifier TEXT, warnings_json TEXT NOT NULL DEFAULT '[]',
   revision INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_facts_patient ON facts(patient_id);
 CREATE TABLE IF NOT EXISTS plans(
@@ -178,6 +179,9 @@ function migrate(database) {
   if (!mcqCols.includes('source')) database.exec("ALTER TABLE mcqs ADD COLUMN source TEXT NOT NULL DEFAULT 'ai_generated'");
   if (!mcqCols.includes('approved_by')) database.exec('ALTER TABLE mcqs ADD COLUMN approved_by TEXT');
   if (!mcqCols.includes('approved_at')) database.exec('ALTER TABLE mcqs ADD COLUMN approved_at TEXT');
+  const factCols = database.prepare('PRAGMA table_info(facts)').all().map((c) => c.name);
+  if (!factCols.includes('qualifier')) database.exec('ALTER TABLE facts ADD COLUMN qualifier TEXT');
+  if (!factCols.includes('warnings_json')) database.exec("ALTER TABLE facts ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'");
   // Backfill topic_key for older rows, then create index (must run after ALTER on pre-M4 DBs).
   try {
     database.exec(`UPDATE mcqs SET topic_key = lower(trim(topic)) WHERE topic_key IS NULL OR topic_key=''`);

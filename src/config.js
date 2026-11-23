@@ -21,6 +21,8 @@ export const config = {
   // Example: https://round-ai-admin.vercel.app,https://round-ai-app.vercel.app,http://localhost:5173
   corsOrigin: env.CORS_ORIGIN || '*',
   provider: env.AI_PROVIDER || 'mock', // 'mock' | 'openai'
+  /** Explicit escape hatch for staging demos that must run mock under NODE_ENV=production. */
+  allowMockInProduction: env.ALLOW_MOCK_IN_PRODUCTION === 'true',
   openai: {
     apiKey: env.OPENAI_API_KEY || '',
     model: env.OPENAI_MODEL || '',
@@ -51,8 +53,23 @@ export const config = {
   },
   features: { considerations: env.FEATURE_CONSIDERATIONS === 'true' },
   versions: { prompt: '2026-11-v2', evidencePolicy: '2026-11-v1' },
+  /** Scripted demos: DEMO_MODE=true + DEMO_CLOCK_ISO shifts today()/nowIso(). */
+  demoMode: String(env.DEMO_MODE || '').toLowerCase() === 'true',
+  demoClockIso: String(env.DEMO_CLOCK_ISO || '').trim() || null,
 };
 
 if (env.NODE_ENV === 'production' && config.authSecret === 'dev-only-change-me') {
   throw new Error('AUTH_SECRET must be set in production');
+}
+
+if (
+  env.NODE_ENV === 'production'
+  && config.provider === 'mock'
+  && !config.allowMockInProduction
+) {
+  throw new Error(
+    'AI_PROVIDER=mock is not allowed in production. '
+    + 'Set AI_PROVIDER=openai (or another real provider), '
+    + 'or set ALLOW_MOCK_IN_PRODUCTION=true for an explicit demo escape hatch.',
+  );
 }

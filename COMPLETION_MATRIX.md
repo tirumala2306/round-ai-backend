@@ -12,7 +12,7 @@ Date: 2026-11-20. Statuses: PASS / PARTIAL / FAIL / BLOCKED only.
 | 6 | Fact review | PASS | Passage validation; SpO2 context; identity exclusion. |
 | 7 | Rosa demo consistency | PASS | `purgeIdentityFacts` + source scrub; `ensureRosaDemoCase` idempotent; no user wipe. |
 | 8 | Note draft/review/copy | PASS | Covered by note API tests. |
-| 9 | Learning Elevated Pulse | PASS | 5-option bank; miss schedules review; no fictional example.com curated reads. |
+| 9 | Learning Elevated Pulse | PASS | answer-key normalize; miss due now then 1/3/7; curated PMIDs; 5-option bank; miss schedules review; no fictional example.com curated reads. |
 | 10 | ICD toggle | PASS | Structured plan `include_icd`; accepted codes only. |
 | 11 | Mobile Safari | BLOCKED | Not a backend concern; device E2E not run. |
 

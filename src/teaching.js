@@ -27,6 +27,14 @@ export function teachingPlan({ user, date }) {
     else t.differential += 1;
   }
   const topics = [...map.values()].sort((a, b) => b.count - a.count || a.topic.localeCompare(b.topic));
+  for (const t of topics) {
+    t.bank_count = Number(
+      get(
+        "SELECT COUNT(*) AS n FROM mcqs WHERE status='approved' AND topic_key=?",
+        t.topic_key,
+      )?.n || 0,
+    );
+  }
   audit(user.id, 'teaching_plan', { detail: { date: day, topics: topics.length } });
   return {
     date: day,
@@ -148,19 +156,32 @@ export function approveMcq({ user, id, status = 'approved' }) {
   return { id, status, approved_by, approved_at };
 }
 
+/** Map census problem labels to PubMed-friendly search phrases. */
+function pubmedSearchTopic(topic) {
+  const key = topicKey(topic);
+  const map = {
+    'elevated pulse': 'tachycardia hypoxemia volume assessment sepsis',
+    'community acquired pneumonia': 'community acquired pneumonia oxygen therapy',
+    'acute kidney injury': 'acute kidney injury oliguria creatinine hospital',
+  };
+  return map[key] || topic;
+}
+
 /** Recommended reads with honest labels. "high-yield" only for admin-curated approved items. */
 export async function teachingReads({ topic }) {
   const t = str(topic, 150);
   need(t, 400, 'topic_required', 'topic is required');
   assertQuerySafe(t, null);
   const key = topicKey(t);
+  const searchTopic = pubmedSearchTopic(t);
+  assertQuerySafe(searchTopic, null);
 
   let recent = [];
   let older = [];
   let guidelines = [];
   let retrieval_error = null;
   try {
-    const ev = await searchEvidence({ topic: t, months: 24, includeOlder: true });
+    const ev = await searchEvidence({ topic: searchTopic, months: 24, includeOlder: true });
     recent = (ev.recent || []).slice(0, 5).map((r) => ({
       ...publicCard(r),
       label: 'Recent',
@@ -178,7 +199,7 @@ export async function teachingReads({ topic }) {
     retrieval_error = 'evidence_retrieval_failed';
   }
   try {
-    const g = await searchGuidelines({ topic: t, months: 12 });
+    const g = await searchGuidelines({ topic: searchTopic, months: 12 });
     guidelines = (g.records || []).slice(0, 5).map((r) => ({
       ...publicCard(r),
       label: 'Guideline',

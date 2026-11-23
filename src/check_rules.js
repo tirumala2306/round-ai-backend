@@ -156,6 +156,38 @@ export function seedExampleCheckRules(createdBy = null) {
   return true;
 }
 
+/**
+ * Approve pneumonia + AKI example rules so Rosa reminders work in demos (Prompt 8 P6).
+ * Remaining examples stay draft for admin review. Disable with DEMO_APPROVE_CHECK_RULES=false.
+ */
+export function ensureDemoApprovedCheckRules() {
+  if (String(process.env.DEMO_APPROVE_CHECK_RULES || 'true').toLowerCase() === 'false') {
+    return 0;
+  }
+  const admin = get("SELECT id FROM users WHERE role='admin' LIMIT 1");
+  if (!admin) return 0;
+  const fragments = [
+    'Pneumonia — oxygen and cultures',
+    'AKI — urine output and nephrotoxins',
+  ];
+  let n = 0;
+  const now = nowIso();
+  for (const fragment of fragments) {
+    const row = get(
+      "SELECT id FROM check_rules WHERE name LIKE ? AND status='draft' ORDER BY version DESC LIMIT 1",
+      `%${fragment}%`,
+    );
+    if (!row) continue;
+    run(
+      'UPDATE check_rules SET status=?, approved_by=?, approved_at=?, updated_at=? WHERE id=?',
+      'approved', admin.id, now, now, row.id,
+    );
+    n += 1;
+  }
+  if (n) console.log(`Demo-approved ${n} check-rule(s) (pneumonia/AKI) for reminder walkthrough.`);
+  return n;
+}
+
 export function listCheckRules({ status } = {}) {
   const rows = status
     ? all('SELECT * FROM check_rules WHERE status=? ORDER BY name, version DESC', status)

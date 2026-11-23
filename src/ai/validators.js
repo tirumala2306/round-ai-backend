@@ -41,15 +41,162 @@ export function isIdentityFact(label, value) {
   return false;
 }
 
-export function validateExtractFacts(raw, source, { lowLegibilityLines = [] } = {}) {
+const O2_QUALIFIER_RE = /\b(?:on\s+)?(?:room air|RA|\d+\s*L(?:\/min)?(?:\s*(?:NC|nasal cannula))?|high[- ]flow|BiPAP|CPAP|ventilator|FiO2\s*\d+%?|at rest|on exertion)\b/i;
+
+/** Pull a clinician-facing qualifier from the model or from the passage (SpO2 context). */
+export function extractQualifier(rawQualifier, passage, label, value) {
+  let q = typeof rawQualifier === 'string' ? rawQualifier.trim().slice(0, 120) : '';
+  if (!q) {
+    const needsO2 = /spo2|o2 sat|oxygen sat|oxygenation/i.test(label)
+      || (/^\d+(\.\d+)?%?$/.test(String(value).trim()) && /spo2|o2 sat/i.test(passage));
+    if (needsO2) {
+      const m = String(passage || '').match(O2_QUALIFIER_RE);
+      if (m) q = m[0].trim();
+    }
+  }
+  return q;
+}
+
+/**
+ * Identity header in imported text that does not match the chart patient.
+ * Returns a warning object or null (does not create a fact).
+ */
+export function detectIdentityMismatch(sourceText, displayName) {
+  const text = String(sourceText || '');
+  const chart = String(displayName || '').replace(/\s*\(fictional\)\s*$/i, '').trim();
+  if (!chart) return null;
+  const m = text.match(/\bpatient\s*name\s*[:\-]\s*([^\n\r,;]{2,80})/i)
+    || text.match(/\bname\s*[:\-]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b/);
+  if (!m) return null;
+  const found = m[1].trim().replace(/\s+/g, ' ');
+  if (!found || /john\s*doe|jane\s*doe|dummy|test patient/i.test(found)) {
+    return {
+      code: 'identity_mismatch',
+      message: `Imported text names "${found}" — confirm this belongs to ${chart} before reviewing facts.`,
+      found_name: found,
+      chart_name: chart,
+    };
+  }
+  const foundN = norm(found);
+  const chartN = norm(chart);
+  if (foundN === chartN || chartN.includes(foundN) || foundN.includes(chartN.split(' ')[0])) {
+    return null;
+  }
+  return {
+    code: 'identity_mismatch',
+    message: `Imported text names "${found}", but this chart is ${chart}. Confirm before reviewing.`,
+    found_name: found,
+    chart_name: chart,
+  };
+}
+
+/** Flag fact times far from today or before a known admission day. */
+export function dateWarningForFact(eventTime, { todayIso = null, admissionIso = null } = {}) {
+  if (!eventTime || !isIsoDate(eventTime)) return null;
+  const day = String(eventTime).slice(0, 10);
+  const today = (todayIso || new Date().toISOString().slice(0, 10));
+  const tMs = Date.parse(`${day}T12:00:00Z`);
+  const todayMs = Date.parse(`${today}T12:00:00Z`);
+  if (Number.isNaN(tMs) || Number.isNaN(todayMs)) return null;
+  const daysFromToday = Math.round((todayMs - tMs) / 86400000);
+  if (daysFromToday > 365 || daysFromToday < -7) {
+    return {
+      code: 'implausible_date',
+      message: `Event time ${day} is far from today (${today}). Fix if this is wrong.`,
+      event_day: day,
+    };
+  }
+  if (admissionIso && isIsoDate(admissionIso)) {
+    const adm = String(admissionIso).slice(0, 10);
+    const admMs = Date.parse(`${adm}T12:00:00Z`);
+    if (!Number.isNaN(admMs) && tMs < admMs - 86400000) {
+      return {
+        code: 'before_admission',
+        message: `Event time ${day} is before admission (${adm}).`,
+        event_day: day,
+        admission_day: adm,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * A&P proposals from dictation/extract: each links to a problem or proposes new.
+ * Plan text must appear (normalized) in the source transcript.
+ */
+export function validatePlanProposals(raw, sourceText, problems = []) {
+  const issues = [];
+  const text = norm(sourceText);
+  const byLabel = new Map(
+    (Array.isArray(problems) ? problems : [])
+      .filter((p) => p && p.state !== 'rejected')
+      .map((p) => [norm(p.label), p]),
+  );
+  const out = [];
+  for (const p of Array.isArray(raw?.plan_proposals) ? raw.plan_proposals : []) {
+    const planText = typeof p?.plan_text === 'string' ? p.plan_text.trim().slice(0, 2000) : '';
+    const title = typeof p?.title === 'string' ? p.title.trim().slice(0, 200) : '';
+    const assessment = typeof p?.assessment_text === 'string' ? p.assessment_text.trim().slice(0, 2000) : '';
+    const span = typeof p?.transcript_span === 'string' ? p.transcript_span.trim().slice(0, 500) : '';
+    if (!planText) { issues.push({ code: 'empty_plan_proposal' }); continue; }
+    const check = span || planText;
+    if (!text.includes(norm(check)) && !text.includes(norm(planText))) {
+      issues.push({ code: 'plan_proposal_not_in_source', title: title || planText.slice(0, 40) });
+      continue;
+    }
+    let problemId = typeof p?.problem_id === 'string' ? p.problem_id : null;
+    let problemLabel = title || 'General';
+    let isNew = false;
+    if (problemId) {
+      const hit = (Array.isArray(problems) ? problems : []).find((x) => x.id === problemId);
+      if (!hit) { problemId = null; }
+      else problemLabel = hit.label;
+    }
+    if (!problemId && title) {
+      const hit = byLabel.get(norm(title));
+      if (hit) {
+        problemId = hit.id;
+        problemLabel = hit.label;
+      } else {
+        isNew = true;
+        problemLabel = title;
+      }
+    }
+    out.push({
+      problem_id: problemId,
+      title: problemLabel,
+      assessment_text: assessment || null,
+      plan_text: planText,
+      source: 'dictation_proposal',
+      status: 'proposed',
+      is_new_problem: isNew,
+      transcript_span: span || null,
+    });
+  }
+  return { proposals: out, issues };
+}
+
+export function validateExtractFacts(raw, source, {
+  lowLegibilityLines = [],
+  patientDisplayName = '',
+  admissionIso = null,
+  todayIso = null,
+  problems = [],
+} = {}) {
   const issues = [];
   const facts = [];
   const missing = [];
+  const warnings = [];
   const text = norm(source.text);
   const low = (Array.isArray(lowLegibilityLines) ? lowLegibilityLines : [])
     .filter((x) => typeof x === 'string' && x.trim())
     .map((x) => ({ raw: x.trim(), n: norm(x) }));
   for (const line of low) missing.push(`low_legibility: ${line.raw.slice(0, 200)}`);
+
+  const mismatch = detectIdentityMismatch(source.text, patientDisplayName);
+  if (mismatch) warnings.push(mismatch);
+
   for (const f of Array.isArray(raw?.facts) ? raw.facts : []) {
     const label = typeof f?.label === 'string' ? f.label.trim().slice(0, 120) : '';
     let value = typeof f?.value === 'string' || typeof f?.value === 'number' ? String(f.value).trim().slice(0, 1000) : '';
@@ -66,21 +213,48 @@ export function validateExtractFacts(raw, source, { lowLegibilityLines = [] } = 
       continue;
     }
     if (unsupportedNumbers(value, passage).length) { issues.push({ code: 'value_not_in_passage', label }); continue; }
+
+    let qualifier = extractQualifier(f.qualifier, passage, label, value);
+    if (qualifier && !norm(passage).includes(norm(qualifier))) {
+      issues.push({ code: 'qualifier_not_in_passage', label, qualifier });
+      qualifier = '';
+    }
     // Keep oxygen device / FiO2 context with SpO2 values when present in the passage.
     if (/spo2|o2 sat|oxygen sat|oxygenation/i.test(label) || (/^\d+(\.\d+)?$/.test(value) && /spo2|o2 sat/i.test(passage))) {
-      const o2ctx = passage.match(/\b(?:on\s+)?(?:room air|RA|\d+\s*L(?:\/min)?(?:\s*(?:NC|nasal cannula))?|high[- ]flow|BiPAP|CPAP|ventilator|FiO2\s*\d+%?)\b/i);
+      const o2ctx = passage.match(O2_QUALIFIER_RE);
       if (o2ctx && !new RegExp(o2ctx[0].replace(/\s+/g, '\\s+'), 'i').test(value)) {
         value = `${value} (${o2ctx[0]})`.slice(0, 1000);
       }
+      if (!qualifier && o2ctx) qualifier = o2ctx[0].trim();
     }
+
+    const event_time = isIsoDate(f.event_time) ? f.event_time : source.event_time || null;
+    const factWarnings = [];
+    const dw = dateWarningForFact(event_time, { todayIso, admissionIso });
+    if (dw) factWarnings.push(dw);
+
     facts.push({
       label, value, unit: typeof f.unit === 'string' ? f.unit.trim().slice(0, 20) : '',
-      event_time: isIsoDate(f.event_time) ? f.event_time : source.event_time || null,
+      event_time,
       assertion: ['present', 'negated', 'uncertain'].includes(f.assertion) ? f.assertion : 'present',
       source_passage: passage,
+      qualifier: qualifier || null,
+      warnings: factWarnings,
     });
   }
-  return { output: { facts, missing_information: missing }, issues };
+
+  const { proposals, issues: planIssues } = validatePlanProposals(raw, source.text, problems);
+  issues.push(...planIssues);
+
+  return {
+    output: {
+      facts,
+      missing_information: missing,
+      warnings,
+      plan_proposals: proposals,
+    },
+    issues,
+  };
 }
 
 const UNCERTAIN_RE = /\b(possible|suspected|probable|likely|rule out|r\/o|cannot exclude|differential)\b/i;

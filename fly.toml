@@ -3,7 +3,7 @@
 # See https://docs.fly.io/reference/configuration for information about how to use this file.
 #
 
-app = 'round-ai-backend'
+app = 'roundsai-demo'
 primary_region = 'sin'
 
 [build]
@@ -13,7 +13,6 @@ primary_region = 'sin'
   PORT = '8080'
 
 # Volume name must match Fly Dashboard → Volumes (not vol_… id).
-# Deploy error proved the attached volume is named roundsai_data.
 [[mounts]]
   source = 'roundsai_data'
   destination = '/data'
@@ -21,10 +20,10 @@ primary_region = 'sin'
 [http_service]
   internal_port = 8080
   force_https = true
-  # Keep one machine up so SQLite + volume stay warm during demo.
-  auto_stop_machines = 'off'
+  # Trial account: allow sleep/wake (no card). Machines may still auto-stop ~5 min.
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
 [[vm]]
   size = 'shared-cpu-1x'

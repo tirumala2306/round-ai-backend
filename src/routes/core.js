@@ -24,9 +24,13 @@ export function coreRoutes(r) {
       status: 'ok',
       time: nowIso(),
       provider: providerName(),
+      // Public health may expose model name only (never keys / PHI).
+      model: config.provider === 'openai' ? (config.openai.model || null) : 'mock-1',
       db_path: config.dbPath,
       users,
       patients,
+      demo_mode: !!config.demoMode,
+      demo_clock: config.demoMode ? (config.demoClockIso || null) : null,
     };
   });
 

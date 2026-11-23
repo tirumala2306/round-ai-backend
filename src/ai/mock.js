@@ -12,19 +12,43 @@ function splitSentences(text) {
 const ops = {
   extract_facts({ source }) {
     const facts = [];
-    for (const sentence of splitSentences(source.text)) {
+    const plan_proposals = [];
+    const text = String(source.text || '');
+    for (const sentence of splitSentences(text)) {
       const passage = sentence;
       const lower = sentence.toLowerCase();
+      if (/\b(assessment and plan|a\s*&\s*p|plan:)\b/i.test(sentence)
+        || /\b(continue|start|increase|decrease|check|recheck|follow)\b/i.test(lower)
+          && /\b(ivf|fluids|creatinine|labs|antibiotics|ceftriaxone)\b/i.test(lower)) {
+        const titleMatch = sentence.match(/\b(?:for|of)\s+([A-Za-z][A-Za-z0-9 \-]{2,40})/i);
+        plan_proposals.push({
+          title: titleMatch ? titleMatch[1].trim() : 'General',
+          problem_id: null,
+          assessment_text: null,
+          plan_text: sentence,
+          transcript_span: sentence,
+        });
+        continue;
+      }
       const assertion = /^(no|denies|without)\b/.test(lower) ? 'negated'
         : /\b(possible|suspected|likely|rule out|r\/o|probable)\b/.test(lower) ? 'uncertain' : 'present';
+      const o2 = passage.match(/\b(?:on\s+)?(?:room air|RA|\d+\s*L(?:\/min)?(?:\s*(?:NC|nasal cannula))?)\b/i);
       const m = sentence.match(/([A-Za-z][A-Za-z0-9 ]{1,30}?)\s+(\d+(?:\.\d+)?)\s*(mg\/dL|mmol\/L|mL\/hr|mmHg|bpm|g\/dL|%|C|L)?/);
       if (m && m[3] !== undefined) {
-        facts.push({ label: m[1].trim(), value: m[2], unit: m[3], event_time: source.event_time || null, assertion, source_passage: passage });
+        facts.push({
+          label: m[1].trim(), value: m[2], unit: m[3],
+          qualifier: o2 ? o2[0].trim() : null,
+          event_time: source.event_time || null, assertion, source_passage: passage,
+        });
       } else {
-        facts.push({ label: 'Observation', value: sentence, unit: '', event_time: source.event_time || null, assertion, source_passage: passage });
+        facts.push({
+          label: 'Observation', value: sentence, unit: '',
+          qualifier: o2 ? o2[0].trim() : null,
+          event_time: source.event_time || null, assertion, source_passage: passage,
+        });
       }
     }
-    return { facts };
+    return { facts, plan_proposals };
   },
 
   summarize_patient({ context }) {

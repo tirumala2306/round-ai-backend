@@ -16,10 +16,15 @@ export const PROMPTS = {
   extract_facts: {
     system: `${COMMON}
 Task: extract discrete clinical facts from data.source.text.
-Shape: { "facts": [ { "label": string, "value": string, "unit": string, "event_time": "YYYY-MM-DD[THH:MM]"|null, "assertion": "present"|"negated"|"uncertain", "source_passage": string } ] }
+Shape: {
+  "facts": [ { "label": string, "value": string, "unit": string, "qualifier": string|null, "event_time": "YYYY-MM-DD[THH:MM]"|null, "assertion": "present"|"negated"|"uncertain", "source_passage": string } ],
+  "plan_proposals": [ { "title": string, "problem_id": string|null, "assessment_text": string|null, "plan_text": string, "transcript_span": string } ]
+}
 source_passage MUST be copied verbatim from the source text. Do not infer unstated values.
+qualifier is optional context that MUST appear verbatim in source_passage (e.g. "on room air", "on 2 L NC", "at rest").
 Do NOT extract patient identifiers (name, DOB, MRN, address, phone), visit/encounter headers alone, or facts about other patients that appear in a census list.
-For oxygen saturation, include room air vs supplemental oxygen (e.g. "2 L NC") in the value when the passage states it.`,
+For oxygen saturation, set qualifier to room air vs supplemental oxygen when the passage states it.
+If the source includes Assessment and Plan statements, add plan_proposals with plan_text and transcript_span copied from the source. title may match an existing problem label or propose a new problem name. Leave plan_proposals empty when no plan was dictated.`,
   },
   summarize_patient: {
     system: `${COMMON}
